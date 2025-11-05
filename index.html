@@ -1,0 +1,959 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Deliverability Audit Tool</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <!-- Load Firebase Modules -->
+    <script type="module">
+        import { initializeApp, getApp, getApps } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+        import { getFirestore, doc, collection, query, onSnapshot, addDoc, updateDoc, deleteDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+        
+        // Expose Firebase functions globally for use in the main script block
+        window.firebase = {
+            initializeApp, getApp, getApps, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, 
+            getFirestore, doc, collection, query, onSnapshot, addDoc, updateDoc, deleteDoc, setLogLevel
+        };
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fb;
+        }
+        /* Custom scrollbar for the textarea and report list */
+        textarea::-webkit-scrollbar, #reportList::-webkit-scrollbar {
+            width: 8px;
+        }
+        textarea::-webkit-scrollbar-thumb, #reportList::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+        .lg\:sticky {
+            align-self: flex-start;
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-8 min-h-screen">
+
+    <div class="max-w-6xl mx-auto">
+        <header class="text-center mb-10">
+            <h1 class="text-3xl sm:text-4xl font-bold text-gray-800 mb-2">Email Deliverability Audit</h1>
+            <p class="text-gray-500">Paste your marketing email HTML to check for potential spam filter triggers.</p>
+        </header>
+
+        <div class="flex flex-col lg:flex-row gap-8">
+            <!-- Left Column: Saved Reports -->
+            <div class="lg:w-1/3 bg-white p-6 rounded-xl shadow-lg border border-gray-200 h-fit lg:sticky lg:top-8">
+                <h2 class="text-xl font-bold text-gray-800 mb-4 border-b pb-2">Past Analysis Reports</h2>
+                <div id="reportList" class="space-y-3 max-h-96 overflow-y-auto">
+                    <p id="loadingReports" class="text-sm text-gray-500">Loading reports...</p>
+                    <!-- Saved reports will be injected here -->
+                </div>
+            </div>
+
+            <!-- Right Column: Input & Results -->
+            <div class="lg:w-2/3">
+                <!-- Input Area -->
+                <div id="inputArea" class="bg-white p-6 rounded-xl shadow-lg mb-8 border border-gray-200">
+                    <label for="emailHtml" class="block text-lg font-semibold text-gray-700 mb-3">Paste Email HTML Here</label>
+                    <textarea id="emailHtml" rows="15" class="w-full p-4 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 transition duration-150 text-sm" placeholder="<!-- Start of your email HTML structure... -->"></textarea>
+                    
+                    <div class="mt-4 flex flex-col sm:flex-row gap-4">
+                        <button id="spamCheckBtn" 
+                                class="w-full px-6 py-3 text-white font-semibold rounded-lg shadow-md hover:bg-[#065080] focus:outline-none focus:ring-4 focus:ring-opacity-50 transition duration-150 disabled:bg-gray-300"
+                                style="background-color: #066196;" 
+                                onclick="analyzeEmail()">
+                            Run Spam Check
+                        </button>
+
+                        <button id="accessibilityCheckBtn" 
+                                class="w-full px-6 py-3 text-white font-semibold rounded-lg shadow-md hover:bg-[#1f87b8] focus:outline-none focus:ring-4 focus:ring-opacity-50 transition duration-150 disabled:bg-gray-300"
+                                style="background-color: #2BA8E0;" 
+                                onclick="runAccessibilityCheck()">
+                            Run Accessibility Check
+                        </button>
+                    </div>
+
+                    
+                </div>
+
+                <!-- Output Area -->
+                <div id="resultsContainer" class="hidden">
+                    <h2 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">Analysis Results</h2>
+                    
+                    <!-- Loading Indicator (Hidden initially) -->
+                    <div id="loadingIndicator" class="hidden text-center p-10">
+                        <div class="animate-spin inline-block w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full mb-3"></div>
+                        <p id="loadingMessage" class="text-blue-600 font-medium">Analyzing content for spam traps...</p>
+                    </div>
+
+                    <!-- Score Card and Summary (RESTORED SIMPLE LAYOUT) -->
+                    <div id="scoreCard" class="bg-white p-6 rounded-xl shadow-lg border-2 mb-6">
+                        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center">
+                            <div>
+                                <p class="text-sm font-medium text-gray-500">Deliverability Score (0-100)</p>
+                                <p id="deliverabilityScore" class="text-5xl font-extrabold text-gray-900 mt-1"></p>
+                            </div>
+                            <div class="mt-4 sm:mt-0 sm:ml-6 w-full">
+                                <p id="summaryText" class="text-md font-medium text-gray-700 p-3 bg-gray-50 rounded-lg"></p>
+                            </div>
+                        </div>
+                    </div>
+
+
+                    <!-- Findings and Recommendations -->
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Findings -->
+                        <div id="findingsSection" class="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+                            <h3 class="text-xl font-semibold text-gray-700 mb-4 flex items-center">
+                                <svg class="w-6 h-6 mr-2 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.332 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                                Potential Issues Found
+                            </h3>
+                            <div id="findingsList" class="space-y-4">
+                                <!-- Findings will be injected here -->
+                            </div>
+                        </div>
+
+                        <!-- Recommendations -->
+                        <div id="recommendationsSection" class="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+                            <h3 class="text-xl font-semibold text-gray-700 mb-4 flex items-center">
+                                <svg class="w-6 h-6 mr-2 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                Actionable Recommendations
+                            </h3>
+                            <ul id="recommendationsList" class="list-disc pl-5 space-y-2 text-gray-600">
+                                <!-- Recommendations will be injected here -->
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Accessibility Output Area -->
+                <div id="accessibilityContainer" class="hidden mt-8 bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+                    <h2 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">Accessibility Check Results</h2>
+                    <div id="accessibilityResults" class="space-y-4">
+                        <!-- Accessibility findings will be injected here -->
+                    </div>
+                </div>
+
+                <!-- Custom Alert/Error Box -->
+                <div id="alertBox" class="hidden fixed bottom-4 right-4 max-w-sm w-full bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded shadow-lg transition-opacity duration-300" role="alert">
+                    <strong class="font-bold">Error!</strong>
+                    <span id="alertMessage" class="block sm:inline"></span>
+                    <span class="absolute top-0 bottom-0 right-0 px-4 py-3 cursor-pointer" onclick="document.getElementById('alertBox').classList.add('hidden')">
+                        <svg class="fill-current h-6 w-6 text-red-500" role="button" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><title>Close</title><path d="M14.348 14.849a1.2 1.2 0 0 1-1.697 0L10 11.697l-2.651 2.652a1.2 1.2 0 1 1-1.697-1.697l2.652-2.651-2.652-2.651a1.2 1.2 0 0 1 1.697-1.697L10 8.303l2.651-2.652a1.2 1.2 0 1 1 1.697 1.697L11.697 10l2.652 2.651a1.2 1.2 0 0 1 0 1.698z"/></svg>
+                    </span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        // Ensure setLogLevel is called for debug logging
+        if (typeof window.firebase?.setLogLevel === 'function') {
+            window.firebase.setLogLevel('Debug');
+        } else if (typeof setLogLevel === 'function') {
+            setLogLevel('Debug');
+        } else {
+            console.warn("setLogLevel not available. Debug logging disabled.");
+        }
+        
+        // --- Firebase Globals (Aliased from window.firebase to avoid direct reliance on window) ---
+        const { initializeApp, getApp, getApps, getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged, 
+                getFirestore, doc, collection, query, onSnapshot, addDoc, updateDoc, deleteDoc } = window.firebase || {};
+
+        // --- Global Firebase & App Variables ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        // FIX: Corrected variable name from __initialAuthToken to __initial_auth_token
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null; 
+
+        let app;
+        let db;
+        let auth;
+        let isAuthReady = false;
+        let userId = null;
+        
+        // --- API Configuration and Utility Functions ---
+        const modelName = 'gemini-2.5-flash-preview-05-20';
+        
+        // URL for text generation (Note: ?key=${apiKey} has been removed for Canvas security model)
+        const textApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
+        
+        // System Instruction for the main spam/deliverability audit (Removed count instructions)
+        const auditSystemInstructionParts = [{ text: "You are a Senior Email Deliverability Expert. Your task is to analyze raw email HTML and content to determine the likelihood of it being flagged as spam by major mail providers. The analysis must be highly consistent between runs. If Marketo dynamic links or similar tracking placeholders are present, **you must include a finding with LOW severity for documentation**, but **DO NOT penalize the final deliverability score** for these elements. Focus on: spammy keywords, image-to-text ratio, link integrity, domain reputation flags, and suspicious HTML structure. Provide a professional, structured, and actionable report in JSON format." }];
+        
+        // System Instruction for the accessibility check
+        const accessibilitySystemInstructionParts = [{ text: "You are an Email Accessibility and QA Engineer. Analyze the provided HTML code focusing exclusively on WCAG standards, structural integrity, and deliverability best practices related to rendering and accessibility. Specifically check for: 1. Missing or non-descriptive image 'alt' attributes. 2. Clearly visible and correctly structured unsubscribe links/placeholders. 3. Improper HTML tag nesting, deprecated tags, or excessive inline styling that hinders rendering. Output the results as an array of objects." }];
+
+        // Schema for the main audit (Removed count properties)
+        const auditResponseSchema = {
+            type: "OBJECT",
+            properties: {
+                summary: {
+                    type: "STRING",
+                    description: "A concise, single-sentence summary of the overall assessment based on the generated score."
+                },
+                findings: {
+                    type: "ARRAY",
+                    description: "A list of specific potential spam or deliverability issues.",
+                    items: {
+                        type: "OBJECT",
+                        properties: {
+                            type: {
+                                type: "STRING",
+                                enum: ["Subject Line", "Content Text", "Image Ratio", "Link Structure", "HTML Code", "Other"],
+                                description: "The category of the finding."
+                            },
+                            issue: {
+                                type: "STRING",
+                                description: "A brief description of the issue."
+                            },
+                            detail: {
+                                type: "STRING",
+                                description: "Specific details, including the text or code snippet that triggered the flag."
+                            },
+                            severity: {
+                                type: "STRING",
+                                enum: ["High", "Medium", "Low"],
+                                description: "The urgency of the fix."
+                            }
+                        },
+                        propertyOrdering: ["type", "issue", "detail", "severity"]
+                    }
+                },
+                recommendations: {
+                    type: "ARRAY",
+                    description: "A list of actionable steps to improve the email's deliverability.",
+                    items: { type: "STRING" }
+                }
+            },
+            propertyOrdering: ["summary", "findings", "recommendations"] // Removed total_characters and total_images
+        };
+        
+        // Schema for the Accessibility check (Simplified for display)
+        const accessibilityResponseSchema = {
+            type: "ARRAY",
+            description: "A list of accessibility and structural issues.",
+            items: {
+                type: "OBJECT",
+                properties: {
+                    category: {
+                        type: "STRING",
+                        enum: ["WCAG/Alt Text", "Link Compliance", "HTML Structure", "Other"],
+                        description: "The accessibility category of the finding."
+                    },
+                    issue: {
+                        type: "STRING",
+                        description: "A description of the accessibility issue found."
+                    },
+                    fix_recommendation: {
+                        type: "STRING",
+                        description: "An actionable recommendation to fix the issue."
+                    }
+                },
+                propertyOrdering: ["category", "issue", "fix_recommendation"]
+            }
+        };
+
+        const scoreQueryTemplate = (html) => `Based on email deliverability best practices, analyze the following email HTML and output ONLY a single integer score between 0 (worst) and 100 (best). The score MUST be mathematically consistent for the same input. Do not include any text, headers, or formatting, just the number:\n\n---\n\n${html}`;
+        const auditQueryTemplate = (html) => `Analyze the following email HTML for spam triggers and deliverability issues and generate findings and recommendations:\n\n---\n\n${html}`;
+        const accessibilityQueryTemplate = (html) => `Perform a detailed accessibility and HTML structural audit on an email template. Focus on alt text, unsubscribe links, and structural errors: ${html}`;
+
+        /**
+         * Aggressively cleans HTML content to ensure consistent input hash for the scoring function.
+         */
+        function cleanHtmlForScoring(html) {
+            return html
+                .replace(/\s+/g, ' ')  // Collapse all whitespace (spaces, tabs, newlines)
+                .replace(/<!--[\s\S]*?-->/g, '') // Remove HTML comments
+                .trim();
+        }
+
+        /**
+         * Displays a custom error message to the user.
+         */
+        function showAlert(message) {
+            const alertBox = document.getElementById('alertBox');
+            document.getElementById('alertMessage').textContent = message;
+            alertBox.classList.remove('hidden');
+            setTimeout(() => {
+                alertBox.classList.add('hidden');
+            }, 5000);
+        }
+
+        /**
+         * Handles the visual state for loading.
+         * Note: This function manages only the button text and the main loading indicator visibility.
+         */
+        function setLoading(isLoading, btnId, message = 'Analyzing...') {
+            const btn = document.getElementById(btnId);
+            const loading = document.getElementById('loadingIndicator');
+            const loadingMsg = document.getElementById('loadingMessage');
+            
+            // If starting loading, save the original text
+            if (isLoading && !btn.getAttribute('data-original-text')) {
+                btn.setAttribute('data-original-text', btn.textContent);
+            }
+
+            btn.disabled = isLoading;
+            btn.textContent = isLoading ? message : btn.getAttribute('data-original-text');
+            
+            
+            loadingMsg.textContent = message;
+            loading.classList.toggle('hidden', !isLoading);
+
+            // Hide all output containers when any loading starts
+            if (isLoading) {
+                 document.getElementById('resultsContainer').classList.add('hidden');
+                 document.getElementById('accessibilityContainer').classList.add('hidden');
+            }
+        }
+
+        /**
+         * Resets all CTA buttons to their original text and enabled state.
+         */
+        function resetButtons() {
+            const buttons = ['spamCheckBtn', 'accessibilityCheckBtn'];
+            buttons.forEach(btnId => {
+                const btn = document.getElementById(btnId);
+                const originalText = btn.getAttribute('data-original-text');
+                if (btn && originalText) {
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                    // Reset data-original-text after restoring original state if needed, though keeping it is safer.
+                } else if (btn) {
+                    // Fallback if data-original-text wasn't set (shouldn't happen)
+                    btn.disabled = false;
+                }
+            });
+            document.getElementById('loadingIndicator').classList.add('hidden');
+        }
+
+        /**
+         * Retries a promise function with exponential backoff.
+         */
+        async function retryFetch(fetchFunction, retries = 5, delay = 1000) {
+            for (let i = 0; i < retries; i++) {
+                try {
+                    return await fetchFunction();
+                } catch (error) {
+                    if (i === retries - 1) throw error;
+                    const backoff = delay * Math.pow(2, i) + Math.random() * delay;
+                    await new Promise(resolve => setTimeout(resolve, backoff));
+                }
+            }
+        }
+
+        // --- Firebase Functions (Relies on globals from import map) ---
+        
+        async function initializeAppAndAuth() {
+            if (typeof initializeApp === 'undefined') {
+                document.getElementById('loadingReports').textContent = 'Cannot save or load reports: Firebase SDK not available.';
+                isAuthReady = true;
+                return;
+            }
+
+            if (!firebaseConfig) {
+                isAuthReady = true;
+                document.getElementById('loadingReports').textContent = 'Cannot save or load reports: Firebase config missing.';
+                return;
+            }
+            
+            try {
+                if (!getApps().length) {
+                    app = initializeApp(firebaseConfig);
+                } else {
+                    app = getApp();
+                }
+
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                    } else {
+                        userId = crypto.randomUUID(); 
+                    }
+                    isAuthReady = true;
+                    console.log("Firebase Auth Ready. User ID:", userId);
+                    loadSavedReports();
+                });
+
+            } catch (e) {
+                console.error("Error initializing Firebase or signing in:", e);
+                showAlert("Failed to connect to the database. Report saving is disabled.");
+                isAuthReady = true;
+                document.getElementById('loadingReports').textContent = 'Error connecting to database.';
+            }
+        }
+
+        async function saveReport(htmlContent, analysisData) {
+            if (!isAuthReady || !db || !userId) {
+                return;
+            }
+
+            const reportsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/email_reports`);
+
+            try {
+                const reportDoc = {
+                    timestamp: Date.now(),
+                    score: analysisData.deliverabilityScore,
+                    summary: analysisData.summary,
+                    name: analysisData.summary,
+                    html: htmlContent,
+                    analysis: analysisData
+                };
+
+                await addDoc(reportsCollectionRef, reportDoc);
+            } catch (e) {
+                console.error("Error saving document:", e);
+                showAlert("Error saving the analysis report to the database.");
+            }
+        }
+        
+        function renderReportCard(docId, report) {
+            const date = new Date(report.timestamp).toLocaleDateString();
+            const time = new Date(report.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            
+            let scoreColor = 'text-gray-600';
+            if (report.score >= 80) {
+                scoreColor = 'text-green-600';
+            } else if (report.score >= 60) {
+                scoreColor = 'text-yellow-600';
+            } else {
+                scoreColor = 'text-red-600';
+            }
+            
+            const reportName = report.name || report.summary;
+            
+            return `
+                <div id="report-${docId}" class="group p-3 border border-gray-100 rounded-lg cursor-pointer hover:bg-gray-50 transition duration-150 active:scale-[0.99] relative">
+                    <div onclick="loadReport('${docId}')" class="flex flex-col">
+                        <div class="flex justify-between items-center">
+                            <p class="text-xs text-gray-500">${date} ${time}</p>
+                            <span class="text-xl font-bold ${scoreColor}">${report.score}</span>
+                        </div>
+                        <p id="name-display-${docId}" class="text-sm font-semibold truncate mt-1">${reportName}</p>
+                    </div>
+
+                    <!-- Action Buttons (Visible on hover/focus) -->
+                    <div class="absolute top-1 right-1 flex space-x-1 p-1 bg-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity z-20 shadow">
+                        <!-- Rename Button -->
+                        <button onclick="event.stopPropagation(); window.startRename('${docId}')" class="p-1 text-gray-400 hover:text-blue-600 transition" title="Rename Report">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-9-4l9-9m-4 4l-9 9"></path></svg>
+                        </button>
+                        <!-- Delete Button -->
+                        <button onclick="event.stopPropagation(); window.toggleDeleteConfirm('${docId}', true)" class="p-1 text-gray-400 hover:text-red-600 transition" title="Delete Report">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        </button>
+                    </div>
+
+                    <!-- Delete Confirmation Overlay (hidden by default) -->
+                    <div id="confirm-delete-${docId}" class="absolute inset-0 bg-white/95 rounded-lg flex items-center justify-center p-2 hidden z-10">
+                        <span class="text-xs font-medium text-red-600 mr-2">Delete?</span>
+                        <button onclick="event.stopPropagation(); window.deleteReport('${docId}')" class="bg-red-500 text-white text-xs px-2 py-1 rounded hover:bg-red-600 transition mr-1">Yes</button>
+                        <button onclick="event.stopPropagation(); window.toggleDeleteConfirm('${docId}', false)" class="bg-gray-300 text-gray-800 text-xs px-2 py-1 rounded hover:bg-gray-400 transition">No</button>
+                    </div>
+
+                    <!-- Rename Input Field (hidden by default) -->
+                    <div id="rename-form-${docId}" class="absolute inset-0 bg-white/95 rounded-lg flex items-center justify-center p-2 hidden z-10">
+                        <input id="rename-input-${docId}" type="text" value="${reportName}" class="w-2/3 text-xs p-1 border rounded mr-1" onkeypress="if(event.key === 'Enter') { window.commitRename('${docId}'); event.preventDefault(); }">
+                        <button onclick="event.stopPropagation(); window.commitRename('${docId}')" class="bg-blue-500 text-white text-xs px-2 py-1 rounded hover:bg-blue-600 transition">Save</button>
+                        <button onclick="event.stopPropagation(); window.cancelRename('${docId}')" class="bg-gray-300 text-gray-800 text-xs px-2 py-1 rounded hover:bg-gray-400 transition ml-1">X</button>
+                    </div>
+                </div>
+            `;
+        }
+        
+        window.renameReport = async function(docId, newName) {
+            if (!isAuthReady || !db || !userId) {
+                showAlert("Cannot rename report: Database not ready.");
+                return;
+            }
+
+            const docRef = doc(db, `artifacts/${appId}/users/${userId}/email_reports`, docId);
+            try {
+                await updateDoc(docRef, { name: newName });
+                window.cancelRename(docId);
+            } catch (e) {
+                console.error("Error renaming document:", e);
+                showAlert("Error renaming report. Please try again.");
+            }
+        }
+
+        window.deleteReport = async function(docId) {
+            if (!isAuthReady || !db || !userId) {
+                showAlert("Cannot delete report: Database not ready.");
+                return;
+            }
+
+            const docRef = doc(db, `artifacts/${appId}/users/${userId}/email_reports`, docId);
+            try {
+                await deleteDoc(docRef);
+            } catch (e) {
+                console.error("Error deleting document:", e);
+                showAlert("Error deleting report. Please try again.");
+            }
+        }
+        
+        window.toggleDeleteConfirm = function(docId, show) {
+            const confirmBox = document.getElementById(`confirm-delete-${docId}`);
+            confirmBox.classList.toggle('hidden', !show);
+        }
+
+        window.startRename = function(docId) {
+            const form = document.getElementById(`rename-form-${docId}`);
+            const card = document.getElementById(`report-${docId}`);
+            
+            const currentName = document.getElementById(`name-display-${docId}`).textContent;
+            document.getElementById(`rename-input-${docId}`).value = currentName.trim();
+
+            form.classList.remove('hidden');
+            card.style.zIndex = 100;
+            document.getElementById(`rename-input-${docId}`).focus();
+        }
+        
+        window.cancelRename = function(docId) {
+            const form = document.getElementById(`rename-form-${docId}`);
+            const card = document.getElementById(`report-${docId}`);
+            form.classList.add('hidden');
+            card.style.zIndex = ''; 
+        }
+
+        window.commitRename = function(docId) {
+            const newName = document.getElementById(`rename-input-${docId}`).value.trim();
+            if (newName) {
+                window.renameReport(docId, newName);
+            } else {
+                showAlert("Report name cannot be empty.");
+            }
+        }
+
+        function loadSavedReports() {
+            if (!isAuthReady || !db || !userId) return;
+
+            const reportsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/email_reports`);
+            const q = query(reportsCollectionRef);
+
+            const reportListElement = document.getElementById('reportList');
+            const loadingMessage = document.getElementById('loadingReports');
+
+            if (loadingMessage) loadingMessage.classList.add('hidden');
+
+            onSnapshot(q, (snapshot) => {
+                reportListElement.innerHTML = '';
+                
+                if (snapshot.empty) {
+                    reportListElement.innerHTML = '<p class="text-sm text-gray-500 italic">No saved reports yet. Analyze an email to save your first one!</p>';
+                    return;
+                }
+
+                const reports = [];
+                snapshot.forEach(doc => {
+                    reports.push({ id: doc.id, ...doc.data() });
+                });
+                reports.sort((a, b) => b.timestamp - a.timestamp); 
+
+                reports.forEach(report => {
+                    reportListElement.insertAdjacentHTML('beforeend', renderReportCard(report.id, report));
+                });
+            }, (error) => {
+                console.error("Error fetching reports:", error);
+                reportListElement.innerHTML = '<p class="text-sm text-red-500">Error loading reports.</p>';
+            });
+        }
+        
+        window.loadReport = function(docId) {
+            if (!isAuthReady || !db || !userId) {
+                showAlert("Cannot load report: Database not ready.");
+                return;
+            }
+
+            const reportsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/email_reports`);
+            
+            document.querySelectorAll('#reportList > div').forEach(el => el.classList.remove('bg-blue-100', 'border-blue-400'));
+            const activeCard = document.getElementById(`report-${docId}`);
+            if (activeCard) {
+                activeCard.classList.add('bg-blue-100', 'border-blue-400');
+            }
+
+            setLoading(true, 'spamCheckBtn', 'Loading Saved Report...');
+
+            const docRef = doc(reportsCollectionRef, docId);
+            onSnapshot(docRef, (docSnap) => {
+                // IMPORTANT: Ensure buttons are reset after loading is complete
+                resetButtons(); 
+
+                if (docSnap.exists()) {
+                    const reportData = docSnap.data().analysis;
+                    const htmlContent = docSnap.data().html;
+                    
+                    document.getElementById('emailHtml').value = htmlContent;
+
+                    renderResults(reportData, false);
+                } else {
+                    showAlert("Report not found!");
+                }
+            }, (error) => {
+                resetButtons(); 
+                console.error("Error loading specific report:", error);
+                showAlert("Error retrieving report details.");
+            });
+        }
+        
+        /**
+         * Renders the structured analysis results to the DOM (for Spam Check).
+         */
+        function renderResults(data, shouldSave = true) {
+            const scoreCard = document.getElementById('scoreCard');
+            const scoreElement = document.getElementById('deliverabilityScore');
+            const summaryElement = document.getElementById('summaryText');
+            const findingsList = document.getElementById('findingsList');
+            const recommendationsList = document.getElementById('recommendationsList');
+            
+            document.getElementById('resultsContainer').classList.remove('hidden');
+            document.getElementById('accessibilityContainer').classList.add('hidden'); // Hide other results
+            
+            // 1. Score and Summary
+            scoreElement.textContent = data.deliverabilityScore;
+            summaryElement.textContent = data.summary;
+            
+            // 2. Metrics (REMOVED)
+
+            scoreCard.classList.remove('border-green-500', 'border-yellow-500', 'border-red-500');
+            if (data.deliverabilityScore >= 80) {
+                scoreCard.classList.add('border-green-500');
+            } else if (data.deliverabilityScore >= 60) {
+                scoreCard.classList.add('border-yellow-500');
+            } else {
+                scoreCard.classList.add('border-red-500');
+            }
+
+            // 3. Findings
+            findingsList.innerHTML = '';
+            if (data.findings && data.findings.length > 0) {
+                data.findings.forEach(finding => {
+                    let severityColor = 'text-gray-600 bg-gray-100';
+                    if (finding.severity === 'High') {
+                        severityColor = 'text-red-700 bg-red-100';
+                    } else if (finding.severity === 'Medium') {
+                        severityColor = 'text-yellow-700 bg-yellow-200';
+                    } else if (finding.severity === 'Low') {
+                        severityColor = 'text-green-700 bg-green-100';
+                    }
+
+                    const findingHtml = `
+                        <div class="p-4 border rounded-lg shadow-sm">
+                            <div class="flex justify-between items-center mb-1">
+                                <p class="font-semibold text-gray-800">${finding.issue}</p>
+                                <span class="text-xs font-medium px-2.5 py-0.5 rounded-full ${severityColor}">${finding.severity}</span>
+                            </div>
+                            <p class="text-sm text-gray-600 mb-2">Category: <span class="font-medium">${finding.type}</span></p>
+                            <details class="text-sm text-gray-500">
+                                <summary class="cursor-pointer font-medium hover:text-gray-700 transition">See Details</summary>
+                                <pre class="mt-2 p-2 bg-gray-50 rounded text-xs overflow-x-auto whitespace-pre-wrap break-words">${finding.detail}</pre>
+                            </details>
+                        </div>
+                    `;
+                    findingsList.insertAdjacentHTML('beforeend', findingHtml);
+                });
+            } else {
+                 findingsList.innerHTML = '<p class="text-gray-500 italic">No major issues detected. Great job!</p>';
+            }
+
+            // 4. Recommendations
+            recommendationsList.innerHTML = '';
+            if (data.recommendations && data.recommendations.length > 0) {
+                data.recommendations.forEach(rec => {
+                    recommendationsList.insertAdjacentHTML('beforeend', `<li>${rec}</li>`);
+                });
+            } else {
+                 recommendationsList.innerHTML = '<p class="text-gray-500 italic">The email content is solid. Keep up the good work!</p>';
+            }
+            
+            if (shouldSave) {
+                const htmlContent = document.getElementById('emailHtml').value.trim();
+                saveReport(htmlContent, { deliverabilityScore: data.deliverabilityScore, ...data });
+            }
+        }
+        
+        /**
+         * Renders the structured accessibility results to the DOM.
+         */
+        function renderAccessibilityResults(data) {
+            const resultsContainer = document.getElementById('accessibilityResults');
+            resultsContainer.innerHTML = '';
+
+            document.getElementById('accessibilityContainer').classList.remove('hidden');
+            document.getElementById('resultsContainer').classList.add('hidden'); // Hide other results
+            
+            if (data && data.length > 0) {
+                data.forEach(finding => {
+                    const findingHtml = `
+                        <div class="p-4 border border-gray-300 rounded-lg shadow-sm">
+                            <p class="font-semibold text-gray-800 mb-1">${finding.issue}</p>
+                            <p class="text-sm text-gray-600 mb-2">Category: <span class="font-medium text-blue-700">${finding.category}</span></p>
+                            <p class="text-sm text-gray-700 mt-2 font-medium">Recommendation:</p>
+                            <p class="text-sm text-gray-600 italic">${finding.fix_recommendation}</p>
+                        </div>
+                    `;
+                    resultsContainer.insertAdjacentHTML('beforeend', findingHtml);
+                });
+            } else {
+                 resultsContainer.innerHTML = '<p class="text-gray-500 italic p-4 bg-green-50 rounded-lg">No significant accessibility or structural issues detected. Well done!</p>';
+            }
+        }
+
+        // --- Core Analysis Functions ---
+
+        /**
+         * STEP 1: Fetch a deterministic integer score (0-100).
+         */
+        async function fetchRawScore(htmlContent) {
+            // Use the aggressively cleaned HTML for the most stable scoring input
+            const cleanedHtml = cleanHtmlForScoring(htmlContent);
+
+            const payload = {
+                contents: [{ parts: [{ text: `HTML for scoring: ${cleanedHtml}` }] }],
+                generationConfig: {
+                    temperature: 0.0, // Absolute minimum for consistency
+                },
+                systemInstruction: {
+                    // Hyper-constrained instruction to reduce analysis noise
+                    parts: [{ text: "You are a fixed scoring engine for email deliverability. Analyze the provided HTML and output ONLY the single, deterministic integer score from 0 to 100 based on its risk profile. Do NOT output any surrounding text, headers, or structure. The output MUST be a number." }]
+                }
+            };
+            
+            const response = await retryFetch(async () => {
+                // Removed API key parameter from URL
+                return fetch(textApiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+            });
+
+            if (!response.ok) {
+                throw new Error(`Score API request failed with status: ${response.status}`);
+            }
+
+            const result = await response.json();
+            const rawText = result.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+
+            if (!rawText) {
+                throw new Error("Score generation returned empty response.");
+            }
+
+            // Aggressively parse the first number found
+            const score = parseInt(rawText.match(/\d+/)?.[0]);
+            if (isNaN(score) || score < 0 || score > 100) {
+                // Fallback attempt: If the model returns text, ask it to self-correct and try again.
+                // NOTE: We rely on the model returning the number here.
+                throw new Error(`Invalid score generated: ${rawText}. Please run again.`);
+            }
+            return score;
+        }
+
+        /**
+         * STEP 2: Fetch detailed analysis using the calculated score.
+         */
+        async function fetchDetailedAudit(htmlContent, score) {
+            const payload = {
+                contents: [{ 
+                    // Pass the stable score explicitly in the prompt for the analysis step
+                    parts: [{ text: `The fixed deliverability score for the email is: ${score}. Now, generate the detailed findings, summary, and recommendations based on this score and the following HTML:\n\n---\n\n${htmlContent}` }] 
+                }],
+                generationConfig: {
+                    temperature: 0.0, // Absolute minimum for consistency
+                    responseMimeType: "application/json",
+                    responseSchema: auditResponseSchema,
+                },
+                systemInstruction: {
+                    parts: auditSystemInstructionParts
+                },
+            };
+
+            const response = await retryFetch(async () => {
+                // Removed API key parameter from URL
+                return fetch(textApiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+            });
+            
+            if (!response.ok) {
+                throw new Error(`Audit API request failed with status: ${response.status}`);
+            }
+
+            const result = await response.json();
+            const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+            
+            if (!jsonText) {
+                throw new Error("Audit generation returned empty JSON response.");
+            }
+
+            const analysisData = JSON.parse(jsonText);
+            analysisData.deliverabilityScore = score; // Inject the stable score
+            return analysisData;
+        }
+
+        /**
+         * Main Spam Check Function (exposed globally)
+         */
+        window.analyzeEmail = async function() {
+            const htmlContent = document.getElementById('emailHtml').value.trim();
+            
+            if (!htmlContent) {
+                showAlert("Please paste your email HTML content before running the check.");
+                return;
+            }
+
+            // NOTE: API Key check removed to rely on Canvas's secure injection
+            setLoading(true, 'spamCheckBtn', 'Calculating score for stability...');
+
+            try {
+                // 1. Fetch the stable score
+                const stableScore = await fetchRawScore(htmlContent);
+                
+                // 2. Fetch the detailed audit using the stable score
+                setLoading(true, 'spamCheckBtn', `Score ${stableScore}. Generating detailed report...`);
+                const analysisData = await fetchDetailedAudit(htmlContent, stableScore);
+
+                renderResults(analysisData, true);
+
+            } catch (error) {
+                console.error("Analysis Error:", error);
+                showAlert(`Spam Check failed. Error: ${error.message}`);
+            } finally {
+                // RESET BUTTONS
+                resetButtons(); 
+            }
+        }
+
+        /**
+         * Accessibility Check Function (exposed globally)
+         */
+        window.runAccessibilityCheck = async function() {
+            const htmlContent = document.getElementById('emailHtml').value.trim();
+            
+            if (!htmlContent) {
+                showAlert("Please paste your email HTML content before running the check.");
+                return;
+            }
+
+            setLoading(true, 'accessibilityCheckBtn', 'Running accessibility audit...');
+
+            const payload = {
+                contents: [{ parts: [{ text: accessibilityQueryTemplate(htmlContent) }] }],
+                generationConfig: {
+                    temperature: 0.1, // A little creative freedom here is okay
+                    responseMimeType: "application/json",
+                    responseSchema: accessibilityResponseSchema,
+                },
+                systemInstruction: {
+                    parts: accessibilitySystemInstructionParts
+                },
+            };
+
+            try {
+                const response = await retryFetch(async () => {
+                    // Removed API key parameter from URL
+                    return fetch(textApiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`Accessibility API request failed with status: ${response.status}`);
+                }
+
+                const result = await response.json();
+                const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                
+                if (!jsonText) {
+                    throw new Error("Accessibility audit returned empty JSON response.");
+                }
+
+                const accessibilityData = JSON.parse(jsonText);
+                renderAccessibilityResults(accessibilityData);
+
+            } catch (error) {
+                console.error("Accessibility Audit Error:", error);
+                showAlert(`Accessibility Check failed. Error: ${error.message}`);
+            } finally {
+                // RESET BUTTONS
+                resetButtons();
+            }
+        }
+
+        // --- Firebase Functions for Reports UI ---
+        
+        window.deleteReport = async function(docId) {
+            if (!isAuthReady || !db || !userId) {
+                showAlert("Cannot delete report: Database not ready.");
+                return;
+            }
+
+            const docRef = doc(db, `artifacts/${appId}/users/${userId}/email_reports`, docId);
+            try {
+                await deleteDoc(docRef);
+            } catch (e) {
+                console.error("Error deleting document:", e);
+                showAlert("Error deleting report. Please try again.");
+            }
+        }
+        
+        window.toggleDeleteConfirm = function(docId, show) {
+            const confirmBox = document.getElementById(`confirm-delete-${docId}`);
+            confirmBox.classList.toggle('hidden', !show);
+        }
+
+        window.startRename = function(docId) {
+            const form = document.getElementById(`rename-form-${docId}`);
+            const card = document.getElementById(`report-${docId}`);
+            
+            const currentName = document.getElementById(`name-display-${docId}`).textContent;
+            document.getElementById(`rename-input-${docId}`).value = currentName.trim();
+
+            form.classList.remove('hidden');
+            card.style.zIndex = 100;
+            document.getElementById(`rename-input-${docId}`).focus();
+        }
+        
+        window.cancelRename = function(docId) {
+            const form = document.getElementById(`rename-form-${docId}`);
+            const card = document.getElementById(`report-${docId}`);
+            form.classList.add('hidden');
+            card.style.zIndex = ''; 
+        }
+
+        window.commitRename = function(docId) {
+            const newName = document.getElementById(`rename-input-${docId}`).value.trim();
+            if (newName) {
+                window.renameReport(docId, newName);
+            } else {
+                showAlert("Report name cannot be empty.");
+            }
+        }
+
+
+        // --- Initialization ---
+        initializeAppAndAuth();
+        
+    </script>
+</body>
+</html>
